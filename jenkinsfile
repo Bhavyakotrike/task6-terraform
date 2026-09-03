@@ -24,7 +24,25 @@ pipeline {
         stage('Verify Code') {
             steps {
                 sh '''
-                    echo "Checking project files..."
+                    echo "===== Java Version ====="
+                    java -version
+
+                    echo "===== Node Version ====="
+                    node --version
+
+                    echo "===== NPM Version ====="
+                    npm --version
+
+                    echo "===== Git Version ====="
+                    git --version
+
+                    echo "===== Docker Version ====="
+                    docker --version
+
+                    echo "===== Trivy Version ====="
+                    trivy --version
+
+                    echo "===== Project Files ====="
                     ls -la
                 '''
             }
@@ -51,8 +69,9 @@ pipeline {
         stage('OWASP Dependency Check') {
             steps {
                 dependencyCheck(
-                    additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit -n',
-                    odcInstallation: 'DP-Check'
+                    additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit --noupdate',
+                    odcInstallation: 'DP-Check',
+                    nvdCredentialsId: 'nvdapikey'
                 )
 
                 dependencyCheckPublisher(
@@ -64,13 +83,12 @@ pipeline {
         stage('Trivy File Scan') {
             steps {
                 sh '''
-                    export TMPDIR=/home/ec2-user/trivy-tmp
                     mkdir -p "$TMPDIR"
-                    mkdir -p /home/ec2-user/trivy-cache
+                    mkdir -p "$TRIVY_CACHE_DIR"
 
                     trivy fs \
                     --scanners vuln \
-                    --cache-dir /home/ec2-user/trivy-cache \
+                    --cache-dir "$TRIVY_CACHE_DIR" \
                     . > trivy-fs.txt
                 '''
             }
@@ -87,13 +105,12 @@ pipeline {
         stage('Trivy Image Scan') {
             steps {
                 sh '''
-                    export TMPDIR=/home/ec2-user/trivy-tmp
                     mkdir -p "$TMPDIR"
-                    mkdir -p /home/ec2-user/trivy-cache
+                    mkdir -p "$TRIVY_CACHE_DIR"
 
                     trivy image \
                     --scanners vuln \
-                    --cache-dir /home/ec2-user/trivy-cache \
+                    --cache-dir "$TRIVY_CACHE_DIR" \
                     task6-zomato > trivy-image.txt
                 '''
             }
@@ -108,6 +125,9 @@ pipeline {
                     --name task6-zomato-container \
                     -p 3000:3000 \
                     task6-zomato
+
+                    echo "===== Running Container ====="
+                    docker ps --filter name=task6-zomato-container
                 '''
             }
         }
@@ -121,6 +141,32 @@ pipeline {
             )
 
             echo "Pipeline finished: ${currentBuild.currentResult}"
+        }
+
+        success {
+            echo '''
+            ==========================================
+            TASK 6 PIPELINE SUCCESSFUL
+            ==========================================
+            Git Clone              : SUCCESS
+            SonarQube Analysis     : SUCCESS
+            NPM Dependencies       : SUCCESS
+            OWASP Dependency Check : SUCCESS
+            Trivy File Scan        : SUCCESS
+            Docker Build           : SUCCESS
+            Trivy Image Scan       : SUCCESS
+            Docker Deployment      : SUCCESS
+            ==========================================
+            '''
+        }
+
+        failure {
+            echo '''
+            ==========================================
+            TASK 6 PIPELINE FAILED
+            Check the stage immediately above this message.
+            ==========================================
+            '''
         }
     }
 }
