@@ -1,108 +1,126 @@
 pipeline {
     agent any
+
     tools {
-        jdk 'jdk17'
+        jdk 'jdk21'
         nodejs 'node23'
     }
+
     environment {
-        SCANNER_HOME=tool 'sonar-scanner'
+        SCANNER_HOME = tool 'sonar-scanner'
+        TMPDIR = '/home/ec2-user/trivy-tmp'
+        TRIVY_CACHE_DIR = '/home/ec2-user/trivy-cache'
     }
+
     stages {
-        stage ("clean workspace") {
+
+        stage('Clone Git Repository') {
             steps {
-                cleanWs()
+                git branch: 'main',
+                    url: 'https://github.com/Bhavyakotrike/task6-terraform.git'
             }
         }
-        stage ("Git Checkout") {
+
+        stage('Verify Code') {
             steps {
-                git 'https://github.com/KastroVKiran/Zomato-Project-Kastro.git'
+                sh '''
+                    echo "Checking project files..."
+                    ls -la
+                '''
             }
         }
-        stage("Sonarqube Analysis"){
-            steps{
+
+        stage('SonarQube Analysis') {
+            steps {
                 withSonarQubeEnv('sonar-server') {
-                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=zomato \
-                    -Dsonar.projectKey=zomato '''
+                    sh '''
+                        $SCANNER_HOME/bin/sonar-scanner \
+                        -Dsonar.projectName=task6-zomato \
+                        -Dsonar.projectKey=task6-zomato
+                    '''
                 }
             }
         }
-        stage("Code Quality Gate"){
-           steps {
-                script {
-                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token' 
-                }
-            } 
-        }
-        stage("Install NPM Dependencies") {
+
+        stage('Install NPM Dependencies') {
             steps {
-                sh "npm install"
+                sh 'npm install'
             }
         }
-        stage('OWASP FS SCAN') {
+
+        stage('OWASP Dependency Check') {
             steps {
-                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit -n', odcInstallation: 'DP-Check'
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                dependencyCheck(
+                    additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit -n',
+                    odcInstallation: 'DP-Check'
+                )
+
+                dependencyCheckPublisher(
+                    pattern: '**/dependency-check-report.xml'
+                )
+            }
+        }
+
+        stage('Trivy File Scan') {
+            steps {
+                sh '''
+                    export TMPDIR=/home/ec2-user/trivy-tmp
+                    mkdir -p "$TMPDIR"
+                    mkdir -p /home/ec2-user/trivy-cache
+
+                    trivy fs \
+                    --scanners vuln \
+                    --cache-dir /home/ec2-user/trivy-cache \
+                    . > trivy-fs.txt
+                '''
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh '''
+                    docker build -t task6-zomato .
+                '''
+            }
+        }
+
+        stage('Trivy Image Scan') {
+            steps {
+                sh '''
+                    export TMPDIR=/home/ec2-user/trivy-tmp
+                    mkdir -p "$TMPDIR"
+                    mkdir -p /home/ec2-user/trivy-cache
+
+                    trivy image \
+                    --scanners vuln \
+                    --cache-dir /home/ec2-user/trivy-cache \
+                    task6-zomato > trivy-image.txt
+                '''
+            }
+        }
+
+        stage('Docker Run') {
+            steps {
+                sh '''
+                    docker rm -f task6-zomato-container 2>/dev/null || true
+
+                    docker run -d \
+                    --name task6-zomato-container \
+                    -p 3000:3000 \
+                    task6-zomato
+                '''
+            }
+        }
     }
-}
-        stage ("Trivy File Scan") {
-            steps {
-                sh "trivy fs . > trivy.txt"
-            }
-        }
-        stage ("Build Docker Image") {
-            steps {
-                sh "docker build -t zomato ."
-            }
-        }
-        stage ("Tag & Push to DockerHub") {
-            steps {
-                script {
-                    withDockerRegistry(credentialsId: 'docker') {
-                        sh "docker tag zomato kastrov/zomato:latest "
-                        sh "docker push kastrov/zomato:latest "
-                    }
-                }
-            }
-        }
-        stage('Docker Scout Image') {
-            steps {
-                script{
-                   withDockerRegistry(credentialsId: 'docker', toolName: 'docker'){
-                       sh 'docker-scout quickview kastrov/zomato:latest'
-                       sh 'docker-scout cves kastrov/zomato:latest'
-                       sh 'docker-scout recommendations kastrov/zomato:latest'
-                   }
-                }
-            }
-        }
-        stage ("Deploy to Container") {
-            steps {
-                sh 'docker run -d --name zomato -p 3000:3000 kastrov/zomato:latest'
-            }
-        }
-    }
+
     post {
-    always {
-        emailext attachLog: true,
-            subject: "'${currentBuild.result}'",
-            body: """
-                <html>
-                <body>
-                    <div style="background-color: #FFA07A; padding: 10px; margin-bottom: 10px;">
-                        <p style="color: white; font-weight: bold;">Project: ${env.JOB_NAME}</p>
-                    </div>
-                    <div style="background-color: #90EE90; padding: 10px; margin-bottom: 10px;">
-                        <p style="color: white; font-weight: bold;">Build Number: ${env.BUILD_NUMBER}</p>
-                    </div>
-                    <div style="background-color: #87CEEB; padding: 10px; margin-bottom: 10px;">
-                        <p style="color: white; font-weight: bold;">URL: ${env.BUILD_URL}</p>
-                    </div>
-                </body>
-                </html>
-            """,
-            to: 'kastrokiran@gmail.com',
-            mimeType: 'text/html',
-            attachmentsPattern: 'trivy.txt'
+        always {
+            archiveArtifacts(
+                artifacts: 'trivy-fs.txt,trivy-image.txt,**/dependency-check-report.xml',
+                allowEmptyArchive: true
+            )
+
+            echo "Pipeline finished: ${currentBuild.currentResult}"
         }
     }
 }
