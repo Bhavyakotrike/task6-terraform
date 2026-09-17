@@ -1,172 +1,209 @@
 pipeline {
     agent any
 
-    tools {
-        jdk 'jdk21'
-        nodejs 'node23'
-    }
-
     environment {
-        SCANNER_HOME = tool 'sonar-scanner'
-        TMPDIR = '/home/ec2-user/trivy-tmp'
-        TRIVY_CACHE_DIR = '/home/ec2-user/trivy-cache'
+        REGION = 'ap-south-1'
+        ACCOUNT = '476603352136'
+        ECR_REPO = 'bhavya-zomato'
+        EKS_CLUSTER = 'task8-eks-cluster'
+        IMAGE = "${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}:${BUILD_NUMBER}"
     }
 
     stages {
 
-        stage('Clone Git Repository') {
-            steps {
-                git branch: 'main',
-                    url: 'https://github.com/Bhavyakotrike/task6-terraform.git'
-            }
-        }
-
-        stage('Verify Code') {
+        stage('Install Tools') {
             steps {
                 sh '''
-                    echo "===== Java Version ====="
-                    java -version
+                    echo "Installing Git..."
+                    sudo dnf install -y git
 
-                    echo "===== Node Version ====="
-                    node --version
+                    echo "Installing Docker..."
+                    sudo dnf install -y docker
+                    sudo systemctl enable --now docker
+                    sudo docker --version
 
-                    echo "===== NPM Version ====="
-                    npm --version
+                    echo "Installing AWS CLI..."
+                    if ! command -v aws >/dev/null; then
+                        sudo dnf install -y unzip
+                        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o aws.zip
+                        unzip -q aws.zip
+                        sudo ./aws/install
+                        rm -rf aws aws.zip
+                    fi
+                    aws --version
 
-                    echo "===== Git Version ====="
-                    git --version
+                    echo "Installing Node.js..."
+                    if ! command -v node >/dev/null; then
+                        curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+                        sudo dnf install -y nodejs
+                    fi
+                    node -v
+                    npm -v
 
-                    echo "===== Docker Version ====="
-                    docker --version
+                    echo "Installing kubectl..."
+                    if ! command -v kubectl >/dev/null; then
+                        curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                        sudo install -m 0755 kubectl /usr/local/bin/kubectl
+                        rm kubectl
+                    fi
+                    kubectl version --client
 
-                    echo "===== Trivy Version ====="
-                    trivy --version
-
-                    echo "===== Project Files ====="
-                    ls -la
+                    echo "Installing eksctl..."
+                    if ! command -v eksctl >/dev/null; then
+                        curl -sL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_Linux_amd64.tar.gz" | tar xz -C /tmp
+                        sudo mv /tmp/eksctl /usr/local/bin/
+                    fi
+                    eksctl version
                 '''
             }
         }
 
-        stage('SonarQube Analysis') {
-            steps {
-                withSonarQubeEnv('sonar-server') {
-                    sh '''
-                        $SCANNER_HOME/bin/sonar-scanner \
-                        -Dsonar.projectName=task6-zomato \
-                        -Dsonar.projectKey=task6-zomato
-                    '''
-                }
-            }
-        }
-
-        stage('Install NPM Dependencies') {
-            steps {
-                sh 'npm install'
-            }
-        }
-
-        stage('OWASP Dependency Check') {
-            steps {
-                dependencyCheck(
-                    additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit --noupdate',
-                    odcInstallation: 'DP-Check',
-                    nvdCredentialsId: 'nvdapikey'
-                )
-
-                dependencyCheckPublisher(
-                    pattern: '**/dependency-check-report.xml'
-                )
-            }
-        }
-
-        stage('Trivy File Scan') {
+        stage('Clone & Build') {
             steps {
                 sh '''
-                    mkdir -p "$TMPDIR"
-                    mkdir -p "$TRIVY_CACHE_DIR"
+                    rm -rf application
+                    git clone -b task8-eks \
+                    https://github.com/Bhavyakotrike/task6-terraform.git application
 
-                    trivy fs \
-                    --scanners vuln \
-                    --cache-dir "$TRIVY_CACHE_DIR" \
-                    . > trivy-fs.txt
+                    cd application
+                    npm install
+                    npm run build
                 '''
             }
         }
 
-        stage('Docker Build') {
+        stage('Docker Build & ECR') {
             steps {
                 sh '''
-                    docker build -t task6-zomato .
+                    cd application
+
+                    echo "Building Docker image..."
+                    sudo docker build -t bhavya-zomato:${BUILD_NUMBER} .
+
+                    echo "Creating ECR repository..."
+                    aws ecr describe-repositories \
+                        --repository-names ${ECR_REPO} \
+                        --region ${REGION} >/dev/null 2>&1 || \
+                    aws ecr create-repository \
+                        --repository-name ${ECR_REPO} \
+                        --region ${REGION}
+
+                    echo "Login to ECR..."
+                    aws ecr get-login-password --region ${REGION} | \
+                    sudo docker login --username AWS --password-stdin \
+                    ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com
+
+                    sudo docker tag \
+                        bhavya-zomato:${BUILD_NUMBER} ${IMAGE}
+
+                    echo "Pushing image..."
+                    sudo docker push ${IMAGE}
                 '''
             }
         }
 
-        stage('Trivy Image Scan') {
+        stage('Create EKS') {
             steps {
                 sh '''
-                    mkdir -p "$TMPDIR"
-                    mkdir -p "$TRIVY_CACHE_DIR"
+                    if eksctl get cluster --name ${EKS_CLUSTER} \
+                        --region ${REGION} >/dev/null 2>&1; then
 
-                    trivy image \
-                    --scanners vuln \
-                    --cache-dir "$TRIVY_CACHE_DIR" \
-                    task6-zomato > trivy-image.txt
+                        echo "EKS cluster already exists."
+
+                    else
+                        echo "Creating EKS cluster..."
+
+                        eksctl create cluster \
+                            --name ${EKS_CLUSTER} \
+                            --region ${REGION} \
+                            --nodegroup-name task8-nodes \
+                            --node-type t3.medium \
+                            --nodes 2 \
+                            --nodes-min 2 \
+                            --nodes-max 2 \
+                            --managed
+                    fi
+
+                    aws eks update-kubeconfig \
+                        --region ${REGION} \
+                        --name ${EKS_CLUSTER}
+
+                    kubectl get nodes -o wide
                 '''
             }
         }
 
-        stage('Docker Run') {
+        stage('Deploy Application') {
             steps {
                 sh '''
-                    docker rm -f task6-zomato-container 2>/dev/null || true
+                    cd application
 
-                    docker run -d \
-                    --name task6-zomato-container \
-                    -p 3000:3000 \
-                    task6-zomato
+                    echo "Updating deployment image..."
+                    sed "s|IMAGE_PLACEHOLDER|${IMAGE}|g" \
+                        Kubernetes/deployment.yaml > /tmp/deployment.yaml
 
-                    echo "===== Running Container ====="
-                    docker ps --filter name=task6-zomato-container
+                    echo "Applying Deployment..."
+                    kubectl apply -f /tmp/deployment.yaml
+
+                    echo "Applying LoadBalancer Service..."
+                    kubectl apply -f Kubernetes/service.yaml
+
+                    kubectl rollout status deployment/zomato \
+                        --timeout=180s
+                '''
+            }
+        }
+
+        stage('Verify') {
+            steps {
+                sh '''
+                    echo "===== NODES ====="
+                    kubectl get nodes -o wide
+
+                    echo "===== PODS ====="
+                    kubectl get pods -o wide
+
+                    echo "===== DEPLOYMENT ====="
+                    kubectl get deployment zomato
+
+                    echo "===== SERVICE ====="
+                    kubectl get svc zomato
+
+                    echo "Waiting for Load Balancer..."
+
+                    for i in {1..30}; do
+                        LB=$(kubectl get svc zomato \
+                            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' \
+                            2>/dev/null || true)
+
+                        [ -n "$LB" ] && break
+                        sleep 10
+                    done
+
+                    if [ -z "$LB" ]; then
+                        echo "Load Balancer not ready."
+                        exit 1
+                    fi
+
+                    echo "================================"
+                    echo "APPLICATION URL"
+                    echo "http://${LB}:3000"
+                    echo "================================"
+
+                    curl -fsS --max-time 10 \
+                        "http://${LB}:3000" >/dev/null && \
+                        echo "Application is UP!"
                 '''
             }
         }
     }
 
     post {
-        always {
-            archiveArtifacts(
-                artifacts: 'trivy-fs.txt,trivy-image.txt,**/dependency-check-report.xml',
-                allowEmptyArchive: true
-            )
-
-            echo "Pipeline finished: ${currentBuild.currentResult}"
-        }
-
         success {
-            echo '''
-            ==========================================
-            TASK 6 PIPELINE SUCCESSFUL
-            ==========================================
-            Git Clone              : SUCCESS
-            SonarQube Analysis     : SUCCESS
-            NPM Dependencies       : SUCCESS
-            OWASP Dependency Check : SUCCESS
-            Trivy File Scan        : SUCCESS
-            Docker Build           : SUCCESS
-            Trivy Image Scan       : SUCCESS
-            Docker Deployment      : SUCCESS
-            ==========================================
-            '''
+            echo 'Task 8 deployment completed successfully.'
         }
-
         failure {
-            echo '''
-            ==========================================
-            TASK 6 PIPELINE FAILED
-            Check the stage immediately above this message.
-            ==========================================
-            '''
+            echo 'Task 8 deployment failed. Check console output.'
         }
     }
 }
