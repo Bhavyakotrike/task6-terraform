@@ -14,8 +14,19 @@ spec:
       labels:
         app: zomato
     spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app: zomato
+            topologyKey: kubernetes.io/hostname
       containers:
       - name: zomato
-        image: yaswanth032/zomato:latest
+        image: IMAGE_PLACEHOLDER
+        imagePullPolicy: Always
         ports:
         - containerPort: 3000
+        env:
+        - name: HOST
+          value: "0.0.0.0"
