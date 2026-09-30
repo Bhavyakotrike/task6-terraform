@@ -23,7 +23,7 @@ spec:
             topologyKey: kubernetes.io/hostname
       containers:
       - name: zomato
-        image: 476603352136.dkr.ecr.ap-south-1.amazonaws.com/kb-zomato:build-34
+        image: 476603352136.dkr.ecr.ap-south-1.amazonaws.com/kb-zomato:build-35
         imagePullPolicy: Always
         ports:
         - containerPort: 3000
