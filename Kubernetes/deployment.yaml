@@ -36,7 +36,7 @@ spec:
 
       containers:
         - name: zomato
-          image: 476603352136.dkr.ecr.ap-south-1.amazonaws.com/kb-zomato:build-40
+          image: 476603352136.dkr.ecr.ap-south-1.amazonaws.com/kb-zomato:build-41
           imagePullPolicy: Always
 
           ports:
